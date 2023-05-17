@@ -461,6 +461,11 @@ impl pallet_template::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 }
 
+impl pallet_sudo::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type RuntimeCall = RuntimeCall;
+}
+
 // Create the runtime by composing the FRAME pallets that were previously configured.
 construct_runtime!(
 	pub enum Runtime where
@@ -493,6 +498,7 @@ construct_runtime!(
 
 		// Template
 		TemplatePallet: pallet_template = 40,
+		Sudo: pallet_sudo = 41,
 	}
 );
 
