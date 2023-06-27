@@ -73,6 +73,18 @@ cumulus-primitives-utility = { git = "https://github.com/paritytech/cumulus.git"
 pallet-collator-selection = { git = "https://github.com/paritytech/cumulus.git", branch = "polkadot-v0.9.42", default-features = false }
 parachain-info = { git = "https://github.com/paritytech/cumulus.git", branch = "polkadot-v0.9.42", default-features = false }
 
+primitives = { path = "../primitives", default-features = false }
+
+# orml crates
+orml-tokens = { git = "https://github.com/open-web3-stack/open-runtime-module-library", branch = "polkadot-v0.9.42", default-features = false }
+orml-currencies = { git = "https://github.com/open-web3-stack/open-runtime-module-library", branch = "polkadot-v0.9.42", default-features = false }
+orml-traits = { git = "https://github.com/open-web3-stack/open-runtime-module-library", branch = "polkadot-v0.9.42", default-features = false }
+orml-xtokens = { git = "https://github.com/open-web3-stack/open-runtime-module-library", branch = "polkadot-v0.9.42", default-features = false }
+orml-xcm = { git = "https://github.com/open-web3-stack/open-runtime-module-library", branch = "polkadot-v0.9.42", default-features = false }
+orml-xcm-support = { git = "https://github.com/open-web3-stack/open-runtime-module-library", branch = "polkadot-v0.9.42", default-features = false }
+orml-unknown-tokens = { git = "https://github.com/open-web3-stack/open-runtime-module-library", branch = "polkadot-v0.9.42", default-features = false }
+orml-asset-registry = { git = "https://github.com/open-web3-stack/open-runtime-module-library", branch = "polkadot-v0.9.42", default-features = false }
+
 [features]
 default = [
 	"std",
@@ -122,6 +134,15 @@ std = [
 	"xcm-executor/std",
 	"xcm/std",
 	"substrate-wasm-builder",
+	"orml-tokens/std",
+	"orml-currencies/std",
+	"orml-traits/std",
+	"orml-xtokens/std",
+	"orml-xcm/std",
+	"orml-xcm-support/std",
+	"orml-unknown-tokens/std",
+	"orml-asset-registry/std",
+	"primitives/std",
 ]
 
 runtime-benchmarks = [
@@ -161,4 +182,8 @@ try-runtime = [
 	"pallet-transaction-payment/try-runtime",
 	"pallet-xcm/try-runtime",
 	"parachain-info/try-runtime",
+	"orml-tokens/try-runtime",
+	"orml-xtokens/try-runtime",
+	"orml-unknown-tokens/try-runtime",
+	"orml-asset-registry/try-runtime",
 ]

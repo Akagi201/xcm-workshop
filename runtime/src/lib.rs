@@ -29,7 +29,10 @@ use frame_support::{
 	construct_runtime,
 	dispatch::DispatchClass,
 	parameter_types,
-	traits::{ConstU32, ConstU64, ConstU8, EitherOfDiverse, Everything},
+	traits::{
+		ConstU32, ConstU64, ConstU8, Contains, EitherOfDiverse, EnsureOrigin, EnsureOriginWithArg,
+		Everything,
+	},
 	weights::{
 		constants::WEIGHT_REF_TIME_PER_SECOND, ConstantMultiplier, Weight, WeightToFeeCoefficient,
 		WeightToFeeCoefficients, WeightToFeePolynomial,
@@ -41,6 +44,7 @@ use frame_system::{
 	EnsureRoot,
 };
 use pallet_xcm::{EnsureXcm, IsVoiceOfBody};
+use primitives::{Amount, CustomMetadata, TokenId};
 pub use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 pub use sp_runtime::{MultiAddress, Perbill, Permill};
 use xcm_config::{RelayLocation, XcmConfig, XcmOriginToTransactDispatchOrigin};
@@ -326,6 +330,7 @@ impl pallet_authorship::Config for Runtime {
 
 parameter_types! {
 	pub const ExistentialDeposit: Balance = EXISTENTIAL_DEPOSIT;
+	pub const MaxReserves: u32 = 50;
 }
 
 impl pallet_balances::Config for Runtime {
@@ -338,7 +343,7 @@ impl pallet_balances::Config for Runtime {
 	type ExistentialDeposit = ExistentialDeposit;
 	type AccountStore = System;
 	type WeightInfo = pallet_balances::weights::SubstrateWeight<Runtime>;
-	type MaxReserves = ConstU32<50>;
+	type MaxReserves = MaxReserves;
 	type ReserveIdentifier = [u8; 8];
 	type HoldIdentifier = ();
 	type FreezeIdentifier = ();
@@ -466,6 +471,89 @@ impl pallet_sudo::Config for Runtime {
 	type RuntimeCall = RuntimeCall;
 }
 
+// TODO: add all module accounts
+#[allow(unused_mut)]
+pub fn get_all_module_accounts() -> Vec<AccountId> {
+	let mut all_accounts = vec![];
+	// all_accounts.extend(pallet_balances::Pallet::<Runtime>::all_accounts());
+	// all_accounts.extend(pallet_template::Pallet::<Runtime>::all_accounts());
+	all_accounts
+}
+
+pub struct DustRemovalWhitelist;
+impl Contains<AccountId> for DustRemovalWhitelist {
+	fn contains(a: &AccountId) -> bool {
+		get_all_module_accounts().contains(a)
+	}
+}
+
+impl orml_tokens::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Balance = Balance;
+	type Amount = Amount;
+	type CurrencyId = TokenId;
+	type WeightInfo = ();
+	type ExistentialDeposits = orml_asset_registry::ExistentialDeposits<Runtime>;
+	type CurrencyHooks = ();
+	type ReserveIdentifier = [u8; 8];
+	type MaxReserves = MaxReserves; // we don't use named reserves
+	type MaxLocks = ConstU32<50>;
+	type DustRemovalWhitelist = DustRemovalWhitelist;
+}
+
+pub const NATIVE_TOKEN_ID: TokenId = 0;
+parameter_types! {
+	pub GetNativeCurrencyId: TokenId = NATIVE_TOKEN_ID;
+}
+
+// type NativeCurrency = orml_tokens::CurrencyAdapter<Runtime, GetNativeCurrencyId>;
+
+impl orml_currencies::Config for Runtime {
+	type MultiCurrency = Tokens;
+	// TODO
+	// type NativeCurrency = NativeCurrency
+	type NativeCurrency =
+		orml_currencies::BasicCurrencyAdapter<Runtime, Balances, Amount, BlockNumber>;
+	type GetNativeCurrencyId = GetNativeCurrencyId;
+	type WeightInfo = ();
+}
+
+impl orml_xcm::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type SovereignOrigin = EnsureRoot<AccountId>;
+}
+
+impl orml_unknown_tokens::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+}
+
+pub struct AssetAuthority;
+impl EnsureOriginWithArg<RuntimeOrigin, Option<u32>> for AssetAuthority {
+	type Success = ();
+
+	fn try_origin(
+		origin: RuntimeOrigin,
+		_asset_id: &Option<u32>,
+	) -> Result<Self::Success, RuntimeOrigin> {
+		EnsureRoot::try_origin(origin)
+	}
+
+	#[cfg(feature = "runtime-benchmarks")]
+	fn try_successful_origin(_asset_id: &Option<u32>) -> Result<RuntimeOrigin, ()> {
+		EnsureRoot::try_successful_origin()
+	}
+}
+
+impl orml_asset_registry::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type CustomMetadata = CustomMetadata;
+	type AssetId = TokenId;
+	type AuthorityOrigin = AssetAuthority;
+	type AssetProcessor = orml_asset_registry::SequentialId<Runtime>;
+	type Balance = Balance;
+	type WeightInfo = ();
+}
+
 // Create the runtime by composing the FRAME pallets that were previously configured.
 construct_runtime!(
 	pub enum Runtime where
@@ -499,6 +587,14 @@ construct_runtime!(
 		// Template
 		TemplatePallet: pallet_template = 40,
 		Sudo: pallet_sudo = 41,
+
+		// ORML
+		Tokens: orml_tokens = 50,
+		Currencies: orml_currencies = 51,
+		OrmlXcm: orml_xcm = 52,
+		XTokens: orml_xtokens = 53,
+		UnknownTokens: orml_unknown_tokens = 54,
+		AssetRegistry: orml_asset_registry = 55,
 	}
 );
 

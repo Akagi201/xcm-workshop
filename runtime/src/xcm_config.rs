@@ -21,6 +21,12 @@ use xcm_builder::{
 	SovereignSignedViaLocation, TakeWeightCredit, UsingComponents, WithComputedOrigin,
 };
 use xcm_executor::{traits::ShouldExecute, XcmExecutor};
+// ORML imports
+use orml_traits::{location::AbsoluteReserveProvider, parameter_type_with_key};
+
+use crate::Balance;
+use primitives::TokenId;
+use sp_runtime::traits::Convert;
 
 parameter_types! {
 	pub const RelayLocation: MultiLocation = MultiLocation::parent();
@@ -253,4 +259,52 @@ impl pallet_xcm::Config for Runtime {
 impl cumulus_pallet_xcm::Config for Runtime {
 	type RuntimeEvent = RuntimeEvent;
 	type XcmExecutor = XcmExecutor<XcmConfig>;
+}
+
+type AssetRegistryOf<T> = orml_asset_registry::Pallet<T>;
+pub struct AccountIdToMultiLocation;
+impl Convert<AccountId, MultiLocation> for AccountIdToMultiLocation {
+	fn convert(account: AccountId) -> MultiLocation {
+		X1(AccountId32 { network: None, id: account.into() }).into()
+	}
+}
+
+pub struct TokenIdConvert;
+impl Convert<TokenId, Option<MultiLocation>> for TokenIdConvert {
+	fn convert(id: TokenId) -> Option<MultiLocation> {
+		AssetRegistryOf::<Runtime>::multilocation(&id).unwrap_or(None)
+	}
+}
+
+parameter_types! {
+	pub SelfLocation: MultiLocation = MultiLocation::new(1, X1(Parachain(ParachainInfo::parachain_id().into())));
+	// pub const BaseXcmWeight: Weight = Weight::from_ref_time(100_000_000);
+	// One XCM operation is 1_000_000_000 weight - almost certainly a conservative estimate.
+	// The default POV size used by Polkadot/Kusama was 64 kB but that has been updated here: https://github.com/paritytech/polkadot/pull/7081
+	// We should properly benchmark instructions and get rid of fixed weights.
+	pub BaseXcmWeight: Weight = Weight::from_parts(1_000_000_000, 1024);
+	pub const MaxAssetsForTransfer: usize = 1;
+}
+
+parameter_type_with_key! {
+	pub ParachainMinFee: |_location: MultiLocation| -> Option<u128> {
+		None
+	};
+}
+
+impl orml_xtokens::Config for Runtime {
+	type RuntimeEvent = RuntimeEvent;
+	type Balance = Balance;
+	type CurrencyId = TokenId;
+	type CurrencyIdConvert = TokenIdConvert;
+	type AccountIdToMultiLocation = AccountIdToMultiLocation;
+	type SelfLocation = SelfLocation;
+	type MinXcmFee = ParachainMinFee;
+	type XcmExecutor = XcmExecutor<XcmConfig>;
+	type MultiLocationsFilter = Everything;
+	type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
+	type BaseXcmWeight = BaseXcmWeight;
+	type UniversalLocation = UniversalLocation;
+	type MaxAssetsForTransfer = MaxAssetsForTransfer;
+	type ReserveProvider = AbsoluteReserveProvider;
 }
