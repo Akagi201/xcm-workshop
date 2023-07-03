@@ -25,7 +25,7 @@ cumulus_based = true
 
 [parachains.collator]
 name = "parachain-1000"
-command = "parachain-template-node-v0.9.42"
+command = "parachain-template-node"
 
 [[parachains]]
 id = 1001
@@ -33,7 +33,7 @@ cumulus_based = true
 
 [parachains.collator]
 name = "parachain-1001"
-command = "parachain-template-node-v0.9.42"
+command = "parachain-template-node"
 
 [[hrmp_channels]]
 sender = 1000
