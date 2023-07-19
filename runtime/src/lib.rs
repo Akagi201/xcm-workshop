@@ -20,6 +20,9 @@ use sp_runtime::{
 	ApplyExtrinsicResult, MultiSignature,
 };
 
+use hex_literal::hex;
+use sp_runtime::traits::AccountIdConversion;
+
 use sp_std::prelude::*;
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
@@ -478,6 +481,15 @@ pub fn get_all_module_accounts() -> Vec<AccountId> {
 	// all_accounts.extend(pallet_balances::Pallet::<Runtime>::all_accounts());
 	// all_accounts.extend(pallet_template::Pallet::<Runtime>::all_accounts());
 	all_accounts
+}
+
+parameter_types! {
+	pub const TreasuryPalletId: PalletId = PalletId(*b"py/trsry");
+	pub TreasuryAccount: AccountId = TreasuryPalletId::get().into_account_truncating();
+	// Until we can codify how to handle forgien tokens that we collect in XCMP fees
+	// we will send the tokens to a special account to be dealt with.
+	// SS58 prefix 51: 68ZdW8SDzsHs8oRFso5sUCK6HvmWMAhMT8LSbwqAReQeHq7G
+	pub TemporaryForeignTreasuryAccount: AccountId = hex!["6ac410dcac7ace36e401163d540cb9bdda1a2295d7e1233c1fc38281cd13ec23"].into();
 }
 
 pub struct DustRemovalWhitelist;

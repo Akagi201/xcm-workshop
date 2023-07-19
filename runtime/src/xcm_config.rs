@@ -1,64 +1,76 @@
 use super::{
 	AccountId, AllPalletsWithSystem, Balances, ParachainInfo, ParachainSystem, PolkadotXcm,
-	Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, WeightToFee, XcmpQueue,
+	Runtime, RuntimeCall, RuntimeEvent, RuntimeOrigin, XcmpQueue,
 };
-use core::{marker::PhantomData, ops::ControlFlow};
+use core::marker::PhantomData;
 use frame_support::{
-	log, match_types, parameter_types,
+	match_types, parameter_types,
 	traits::{ConstU32, Everything, Nothing, ProcessMessageError},
 	weights::Weight,
 };
 use frame_system::EnsureRoot;
 use pallet_xcm::XcmPassthrough;
 use polkadot_parachain::primitives::Sibling;
-use polkadot_runtime_common::impls::ToAuthor;
 use xcm::latest::prelude::*;
 use xcm_builder::{
-	AccountId32Aliases, AllowExplicitUnpaidExecutionFrom, AllowTopLevelPaidExecutionFrom,
-	CreateMatcher, CurrencyAdapter, EnsureXcmOrigin, FixedWeightBounds, IsConcrete, MatchXcm,
+	AccountId32Aliases, AllowTopLevelPaidExecutionFrom, EnsureXcmOrigin, FixedWeightBounds,
 	ParentIsPreset, RelayChainAsNative, SiblingParachainAsNative, SiblingParachainConvertsVia,
 	SignedAccountId32AsNative, SignedToAccountId32, SovereignSignedViaLocation, TakeWeightCredit,
-	UsingComponents, WithComputedOrigin,
+	WithComputedOrigin,
 };
 use xcm_executor::{traits::ShouldExecute, XcmExecutor};
 // ORML imports
-use crate::Balance;
-use orml_traits::{location::AbsoluteReserveProvider, parameter_type_with_key};
-use orml_xcm_support::MultiNativeAsset;
+use crate::{
+	Balance, Currencies, TemporaryForeignTreasuryAccount, TreasuryAccount, UnknownTokens,
+	NATIVE_TOKEN_ID,
+};
+use orml_asset_registry::{AssetRegistryTrader, FixedRateAssetRegistryTrader};
+use orml_traits::{
+	location::AbsoluteReserveProvider, parameter_type_with_key, FixedConversionRateProvider,
+	MultiCurrency,
+};
+use orml_xcm_support::{
+	DepositToAlternative, IsNativeConcrete, MultiCurrencyAdapter, MultiNativeAsset,
+};
 use primitives::TokenId;
-use sp_runtime::traits::Convert;
+use sp_runtime::{traits::Convert, Percent};
+use xcm_builder::{
+	Account32Hash, AllowKnownQueryResponses, AllowSubscriptionsFrom, AllowUnpaidExecutionFrom,
+	TakeRevenue,
+};
 
 parameter_types! {
 	pub const RelayLocation: MultiLocation = MultiLocation::parent();
-	pub const RelayNetwork: Option<NetworkId> = None;
+	pub const RelayNetwork: NetworkId = NetworkId::Polkadot;
 	pub RelayChainOrigin: RuntimeOrigin = cumulus_pallet_xcm::Origin::Relay.into();
-	pub UniversalLocation: InteriorMultiLocation = Parachain(ParachainInfo::parachain_id().into()).into();
+	// The universal location within the global consensus system
+	pub UniversalLocation: InteriorMultiLocation =
+		X2(GlobalConsensus(RelayNetwork::get()), Parachain(ParachainInfo::parachain_id().into()));
+	pub Ancestry: MultiLocation = Parachain(ParachainInfo::parachain_id().into()).into();
 }
 
 /// Type for specifying how a `MultiLocation` can be converted into an `AccountId`. This is used
 /// when determining ownership of accounts for asset transacting and when attempting to use XCM
 /// `Transact` in order to determine the dispatch Origin.
 pub type LocationToAccountId = (
-	// The parent (Relay-chain) origin converts to the parent `AccountId`.
+	// The parent (Relay-chain) origin converts to the default `AccountId`.
 	ParentIsPreset<AccountId>,
 	// Sibling parachain origins convert to AccountId via the `ParaId::into`.
 	SiblingParachainConvertsVia<Sibling, AccountId>,
 	// Straight up local `AccountId32` origins just alias directly to `AccountId`.
 	AccountId32Aliases<RelayNetwork, AccountId>,
+	Account32Hash<RelayNetwork, AccountId>,
 );
 
-/// Means for transacting assets on this chain.
-pub type LocalAssetTransactor = CurrencyAdapter<
-	// Use this currency:
-	Balances,
-	// Use this currency when it is a fungible asset matching the given location or name:
-	IsConcrete<RelayLocation>,
-	// Do a simple punn to convert an AccountId32 MultiLocation into a native chain account ID:
-	LocationToAccountId,
-	// Our chain's account ID type (we can't get away without mentioning it explicitly):
+pub type LocalAssetTransactor = MultiCurrencyAdapter<
+	Currencies,
+	UnknownTokens,
+	IsNativeConcrete<TokenId, TokenIdConvert>,
 	AccountId,
-	// We don't track any teleports.
-	(),
+	LocationToAccountId,
+	TokenId,
+	TokenIdConvert,
+	DepositToAlternative<TreasuryAccount, Currencies, TokenId, AccountId, Balance>,
 >;
 
 /// This is the type we use to convert an (incoming) XCM origin into a local `Origin` instance,
@@ -89,12 +101,12 @@ parameter_types! {
 	pub const MaxAssetsIntoHolding: u32 = 64;
 }
 
-match_types! {
-	pub type ParentOrParentsExecutivePlurality: impl Contains<MultiLocation> = {
-		MultiLocation { parents: 1, interior: Here } |
-		MultiLocation { parents: 1, interior: X1(Plurality { id: BodyId::Executive, .. }) }
-	};
-}
+// match_types! {
+// 	pub type ParentOrParentsExecutivePlurality: impl Contains<MultiLocation> = {
+// 		MultiLocation { parents: 1, interior: Here } |
+// 		MultiLocation { parents: 1, interior: X1(Plurality { id: BodyId::Executive, .. }) }
+// 	};
+// }
 
 //TODO: move DenyThenTry to polkadot's xcm module.
 /// Deny executing the xcm message if it matches any of the Deny filter regardless of anything else.
@@ -121,64 +133,107 @@ where
 }
 
 // See issue <https://github.com/paritytech/polkadot/issues/5233>
-pub struct DenyReserveTransferToRelayChain;
-impl ShouldExecute for DenyReserveTransferToRelayChain {
-	fn should_execute<RuntimeCall>(
-		origin: &MultiLocation,
-		message: &mut [Instruction<RuntimeCall>],
-		_max_weight: Weight,
-		_weight_credit: &mut Weight,
-	) -> Result<(), ProcessMessageError> {
-		message.matcher().match_next_inst_while(
-			|_| true,
-			|inst| match inst {
-				InitiateReserveWithdraw {
-					reserve: MultiLocation { parents: 1, interior: Here },
-					..
-				} |
-				DepositReserveAsset {
-					dest: MultiLocation { parents: 1, interior: Here }, ..
-				} |
-				TransferReserveAsset {
-					dest: MultiLocation { parents: 1, interior: Here }, ..
-				} => {
-					Err(ProcessMessageError::Unsupported) // Deny
-				},
-				// An unexpected reserve transfer has arrived from the Relay Chain. Generally,
-				// `IsReserve` should not allow this, but we just log it here.
-				ReserveAssetDeposited { .. }
-					if matches!(origin, MultiLocation { parents: 1, interior: Here }) =>
-				{
-					log::warn!(
-						target: "xcm::barrier",
-						"Unexpected ReserveAssetDeposited from the Relay Chain",
-					);
-					Ok(ControlFlow::Continue(()))
-				},
-				_ => Ok(ControlFlow::Continue(())),
-			},
-		)?;
+// pub struct DenyReserveTransferToRelayChain;
+// impl ShouldExecute for DenyReserveTransferToRelayChain {
+// 	fn should_execute<RuntimeCall>(
+// 		origin: &MultiLocation,
+// 		message: &mut [Instruction<RuntimeCall>],
+// 		_max_weight: Weight,
+// 		_weight_credit: &mut Weight,
+// 	) -> Result<(), ProcessMessageError> {
+// 		message.matcher().match_next_inst_while(
+// 			|_| true,
+// 			|inst| match inst {
+// 				InitiateReserveWithdraw {
+// 					reserve: MultiLocation { parents: 1, interior: Here },
+// 					..
+// 				} |
+// 				DepositReserveAsset {
+// 					dest: MultiLocation { parents: 1, interior: Here }, ..
+// 				} |
+// 				TransferReserveAsset {
+// 					dest: MultiLocation { parents: 1, interior: Here }, ..
+// 				} => {
+// 					Err(ProcessMessageError::Unsupported) // Deny
+// 				},
+// 				// An unexpected reserve transfer has arrived from the Relay Chain. Generally,
+// 				// `IsReserve` should not allow this, but we just log it here.
+// 				ReserveAssetDeposited { .. }
+// 					if matches!(origin, MultiLocation { parents: 1, interior: Here }) =>
+// 				{
+// 					log::warn!(
+// 						target: "xcm::barrier",
+// 						"Unexpected ReserveAssetDeposited from the Relay Chain",
+// 					);
+// 					Ok(ControlFlow::Continue(()))
+// 				},
+// 				_ => Ok(ControlFlow::Continue(())),
+// 			},
+// 		)?;
 
-		// Permit everything else
-		Ok(())
+// 		// Permit everything else
+// 		Ok(())
+// 	}
+// }
+
+// pub type Barrier = DenyThenTry<
+// 	DenyReserveTransferToRelayChain,
+// 	(
+// 		TakeWeightCredit,
+// 		WithComputedOrigin<
+// 			(
+// 				AllowTopLevelPaidExecutionFrom<Everything>,
+// 				AllowExplicitUnpaidExecutionFrom<ParentOrParentsExecutivePlurality>,
+// 				// ^^^ Parent and its exec plurality get free execution
+// 			),
+// 			UniversalLocation,
+// 			ConstU32<8>,
+// 		>,
+// 	),
+// >;
+
+parameter_types! {
+	// One XCM operation is 1_000_000_000 weight - almost certainly a conservative estimate.
+	// pub UnitWeightCost: Weight = Weight::from_ref_time(1_000_000_000);
+	// pub const MaxInstructions: u32 = 100;
+}
+
+match_types! {
+	pub type ParentOrParentsExecutivePlurality: impl Contains<MultiLocation> = {
+		MultiLocation { parents: 1, interior: Here } |
+		MultiLocation { parents: 1, interior: X1(Plurality { id: BodyId::Executive, .. }) }
+	};
+}
+
+pub type Barrier = (
+	TakeWeightCredit,
+	AllowTopLevelPaidExecutionFrom<Everything>,
+	// This will first calculate the derived origin, before checking it against the barrier implementation
+	WithComputedOrigin<AllowTopLevelPaidExecutionFrom<Everything>, UniversalLocation, ConstU32<8>>,
+	// Expected responses are OK.
+	AllowKnownQueryResponses<PolkadotXcm>,
+	// Subscriptions for version tracking are OK.
+	AllowSubscriptionsFrom<Everything>,
+	// Parent and its exec plurality get free execution
+	AllowUnpaidExecutionFrom<ParentOrParentsExecutivePlurality>,
+);
+
+pub struct FeePerSecondProvider;
+impl FixedConversionRateProvider for FeePerSecondProvider {
+	fn get_fee_per_second(location: &MultiLocation) -> Option<u128> {
+		let metadata = match location {
+			// adapt for re-anchor canonical location bug: https://github.com/paritytech/polkadot/pull/4470
+			MultiLocation { parents: 1, interior: X1(Parachain(para_id)) }
+				if *para_id == u32::from(ParachainInfo::parachain_id()) =>
+				AssetRegistryOf::<Runtime>::metadata(NATIVE_TOKEN_ID)?,
+			_ => AssetRegistryOf::<Runtime>::fetch_metadata_by_location(location)?,
+		};
+		metadata.additional.fee_per_second
 	}
 }
 
-pub type Barrier = DenyThenTry<
-	DenyReserveTransferToRelayChain,
-	(
-		TakeWeightCredit,
-		WithComputedOrigin<
-			(
-				AllowTopLevelPaidExecutionFrom<Everything>,
-				AllowExplicitUnpaidExecutionFrom<ParentOrParentsExecutivePlurality>,
-				// ^^^ Parent and its exec plurality get free execution
-			),
-			UniversalLocation,
-			ConstU32<8>,
-		>,
-	),
->;
+pub type Trader =
+	(AssetRegistryTrader<FixedRateAssetRegistryTrader<FeePerSecondProvider>, ToTreasury>,);
 
 pub struct XcmConfig;
 impl xcm_executor::Config for XcmConfig {
@@ -192,8 +247,7 @@ impl xcm_executor::Config for XcmConfig {
 	type UniversalLocation = UniversalLocation;
 	type Barrier = Barrier;
 	type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
-	type Trader =
-		UsingComponents<WeightToFee, RelayLocation, AccountId, Balances, ToAuthor<Runtime>>;
+	type Trader = Trader;
 	type ResponseHandler = PolkadotXcm;
 	type AssetTrap = PolkadotXcm;
 	type AssetClaims = PolkadotXcm;
@@ -231,11 +285,11 @@ impl pallet_xcm::Config for Runtime {
 	type SendXcmOrigin = EnsureXcmOrigin<RuntimeOrigin, LocalOriginToLocation>;
 	type XcmRouter = XcmRouter;
 	type ExecuteXcmOrigin = EnsureXcmOrigin<RuntimeOrigin, LocalOriginToLocation>;
-	type XcmExecuteFilter = Everything;
+	type XcmExecuteFilter = Nothing;
 	// ^ Disable dispatchable execute on the XCM pallet.
 	// Needs to be `Everything` for local testing.
 	type XcmExecutor = XcmExecutor<XcmConfig>;
-	type XcmTeleportFilter = Everything;
+	type XcmTeleportFilter = Nothing;
 	type XcmReserveTransferFilter = Everything;
 	type Weigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
 	type UniversalLocation = UniversalLocation;
@@ -261,6 +315,33 @@ impl cumulus_pallet_xcm::Config for Runtime {
 	type XcmExecutor = XcmExecutor<XcmConfig>;
 }
 
+pub struct ToTreasury;
+impl TakeRevenue for ToTreasury {
+	fn take_revenue(revenue: MultiAsset) {
+		if let MultiAsset { id: AssetId::Concrete(id), fun: Fungibility::Fungible(amount) } =
+			revenue
+		{
+			if let Some(currency_id) = TokenIdConvert::convert(id) {
+				if currency_id == NATIVE_TOKEN_ID {
+					// Deposit to native treasury account
+					// 20% burned, 80% to the treasury
+					let to_treasury = Percent::from_percent(80).mul_floor(amount);
+					// Due to the way XCM works the amount has already been taken off the total allocation balance.
+					// Thus whatever we deposit here gets added back to the total allocation, and the rest is burned.
+					let _ = Currencies::deposit(currency_id, &TreasuryAccount::get(), to_treasury);
+				} else {
+					// Deposit to foreign treasury account
+					let _ = Currencies::deposit(
+						currency_id,
+						&TemporaryForeignTreasuryAccount::get(),
+						amount,
+					);
+				}
+			}
+		}
+	}
+}
+
 type AssetRegistryOf<T> = orml_asset_registry::Pallet<T>;
 pub struct AccountIdToMultiLocation;
 impl Convert<AccountId, MultiLocation> for AccountIdToMultiLocation {
@@ -273,6 +354,28 @@ pub struct TokenIdConvert;
 impl Convert<TokenId, Option<MultiLocation>> for TokenIdConvert {
 	fn convert(id: TokenId) -> Option<MultiLocation> {
 		AssetRegistryOf::<Runtime>::multilocation(&id).unwrap_or(None)
+	}
+}
+
+impl Convert<MultiLocation, Option<TokenId>> for TokenIdConvert {
+	fn convert(location: MultiLocation) -> Option<TokenId> {
+		match location {
+			// adapt for re-anchor canonical location bug: https://github.com/paritytech/polkadot/pull/4470
+			MultiLocation { parents: 1, interior: X1(Parachain(para_id)) }
+				if para_id == u32::from(ParachainInfo::parachain_id()) =>
+				Some(NATIVE_TOKEN_ID),
+			_ => AssetRegistryOf::<Runtime>::location_to_asset_id(location.clone()),
+		}
+	}
+}
+
+impl Convert<MultiAsset, Option<TokenId>> for TokenIdConvert {
+	fn convert(asset: MultiAsset) -> Option<TokenId> {
+		if let MultiAsset { id: Concrete(location), .. } = asset {
+			Self::convert(location)
+		} else {
+			None
+		}
 	}
 }
 
